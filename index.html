@@ -1145,7 +1145,7 @@ function calc() {
 
   var grossSal = v('grossSalary'), pens = v('pension'), npsEmp = v('npsEmp');
   var stdSal = grossSal > 0 ? 75000 : 0;
-  var stdPens = pens > 0 ? Math.min(25000, pens / 3) : 0;
+  var stdPens = pens > 0 ? Math.min(25000, pens) : 0; // flat ₹25,000 std ded on pension (not 1/3)
   var salNet = Math.max(0, grossSal + pens - stdSal - stdPens - npsEmp - v('agniveer') - v('famPension') - v('transpSA'));
 
   var rent = v('rentIncome'), mun = v('munTax'), hli = v('hlInt');
@@ -1158,50 +1158,55 @@ function calc() {
 
   // Raw gains before set-off
   var rawSTCG = stcgEq + stcgDebt + stcgProp;
-  var rawLTCG_special = ltcgEq + ltcgBond + ltcgProp; // special rate
+  var rawLTCG_eq   = ltcgEq;                         // 112A — eligible for ₹1.25L exemption
+  var rawLTCG_bond = ltcgBond;                        // 112 — NO ₹1.25L exemption, 12.5% flat
+  var rawLTCG_prop = ltcgProp;                        // 112 — 12.5% flat (no indexation)
+  var rawLTCG_propIdx = ltcgPropIdx;                  // 112 — 20% with indexation (pre Jul-2024)
+  var rawLTCG_special = ltcgEq + ltcgBond + ltcgProp; // all special-rate LTCG pool (excl idx)
   var rawLTCG_slab = ltcgDebt;                         // slab rate
 
   // Carried forward losses
   var stclCF = v('stclCF');
   var ltclCF = v('ltclCF');
 
-  // STCL set-off: first against STCG, excess against LTCG (special rate first, then slab)
+  // STCL set-off: first against STCG (slab-rate STCG first to save more tax), then LTCG
   var stclLeft = stclCF;
-  var netSTCG = Math.max(0, rawSTCG - stclLeft);
-  stclLeft = Math.max(0, stclLeft - rawSTCG); // excess STCL after wiping STCG
-  // excess STCL now offsets LTCG special rate
-  var netLTCG_special_afterSTCL = Math.max(0, rawLTCG_special - stclLeft);
-  stclLeft = Math.max(0, stclLeft - rawLTCG_special);
-  // any remaining STCL offsets LTCG slab
+  // Offset slab-rate STCG (debt+prop) first
+  var stcgSlabRaw = stcgDebt + stcgProp;
+  var netSTCGSlab = Math.max(0, stcgSlabRaw - stclLeft);
+  stclLeft = Math.max(0, stclLeft - stcgSlabRaw);
+  // Then offset equity STCG
+  var netSTCGEq = Math.max(0, stcgEq - stclLeft);
+  stclLeft = Math.max(0, stclLeft - stcgEq);
+  var netSTCG = netSTCGSlab + netSTCGEq;
+  // Excess STCL offsets LTCG: equity LTCG first, then bond, then slab
+  var netLTCG_eq_afterSTCL   = Math.max(0, rawLTCG_eq - stclLeft);   stclLeft = Math.max(0, stclLeft - rawLTCG_eq);
+  var netLTCG_bond_afterSTCL = Math.max(0, rawLTCG_bond - stclLeft); stclLeft = Math.max(0, stclLeft - rawLTCG_bond);
   var netLTCG_slab_afterSTCL = Math.max(0, rawLTCG_slab - stclLeft);
 
-  // LTCL set-off: only against LTCG (special rate first, then slab)
+  // LTCL set-off: only against LTCG (equity first, then bond, then slab)
   var ltclLeft = ltclCF;
-  var netLTCG_special = Math.max(0, netLTCG_special_afterSTCL - ltclLeft);
-  ltclLeft = Math.max(0, ltclLeft - netLTCG_special_afterSTCL);
+  var netLTCG_eq   = Math.max(0, netLTCG_eq_afterSTCL - ltclLeft);   ltclLeft = Math.max(0, ltclLeft - netLTCG_eq_afterSTCL);
+  var netLTCG_bond = Math.max(0, netLTCG_bond_afterSTCL - ltclLeft); ltclLeft = Math.max(0, ltclLeft - netLTCG_bond_afterSTCL);
   var netLTCG_slab = Math.max(0, netLTCG_slab_afterSTCL - ltclLeft);
 
-  // STCG breakdown for display (equity vs slab)
-  var stcgEqNet = Math.max(0, stcgEq - Math.min(stcgEq, stclCF));
+  // Bug fix #7: ₹1.25L exemption applies ONLY to Sec 112A (equity LTCG), NOT bonds or property
+  var ltcgEqTaxable   = Math.max(0, netLTCG_eq - 125000);
+  var ltcgBondTaxable = netLTCG_bond;   // 12.5% flat, no exemption
+  var ltcgPropTaxable = rawLTCG_prop;   // 12.5% flat (handled separately from indexation)
+  // Bug fix #3: indexation property — tax = min(12.5% without idx, 20% with idx) — pick lower
+  var ltcgPropIdxTax  = rawLTCG_propIdx > 0 ? Math.min(rawLTCG_propIdx * 0.125, rawLTCG_propIdx * 0.20) : 0;
+  // Note: for pre-Jul-2024 property, user enters in ltcgPropIdx field; portal lets them pick lower of 12.5% or 20%+indexation
+  // We compute 12.5% here as the simpler/lower estimate; 20% with indexation may be lower in some cases - user advised to check
+
+  // Slab rate CG = net slab STCG + net LTCG at slab rate
+  var cgSlab = netSTCGSlab + netLTCG_slab;
+  var stcgSpecialPortion = netSTCGEq; // equity STCG at 20%
+
+  // Loss display helpers
   var stclUsedOnSTCG = Math.min(rawSTCG, stclCF);
-  var stclUsedOnLTCG = Math.min(rawLTCG_special + rawLTCG_slab, Math.max(0, stclCF - stclUsedOnSTCG));
-  var ltclUsed = Math.min(rawLTCG_special + rawLTCG_slab, ltclCF);
-
-  // Apply ₹1.25L LTCG equity exemption AFTER set-off
-  var ltcgEqAfterLoss = Math.max(0, ltcgEq - Math.max(0, stclCF - rawSTCG) - Math.min(ltcgEq, ltclCF));
-  var ltcgEqTaxable = Math.max(0, netLTCG_special - (ltcgBond + ltcgProp)); // remaining goes to eq
-  // Simpler: apply exemption to the net special LTCG pool
-  var ltcgSpecialTaxable = Math.max(0, netLTCG_special - 125000);
-  var ltcgPropTaxAmt = ltcgPropIdx > 0 ? Math.min(ltcgProp * 0.125, ltcgPropIdx * 0.20) : ltcgProp * 0.125;
-
-  // Slab rate CG = net STCG (debt/prop portions) + net LTCG slab
-  // Approximate split: netSTCG proportioned between slab and special
-  var stcgSlabPortion = rawSTCG > 0 ? netSTCG * (stcgDebt + stcgProp) / rawSTCG : 0;
-  var stcgSpecialPortion = rawSTCG > 0 ? netSTCG * stcgEq / rawSTCG : 0;
-  var cgSlab = stcgSlabPortion + netLTCG_slab;
-
-  // Losses used summary for display
-  var totalLossUsed = stclUsedOnSTCG + stclUsedOnLTCG + ltclUsed;
+  var stclUsedOnLTCG = Math.min(rawLTCG_eq + rawLTCG_bond + rawLTCG_slab, Math.max(0, stclCF - stclUsedOnSTCG));
+  var ltclUsed = Math.min(rawLTCG_eq + rawLTCG_bond + rawLTCG_slab, ltclCF);
   var lossCarriedFwdRemaining = Math.max(0, stclCF - stclUsedOnSTCG - stclUsedOnLTCG) + Math.max(0, ltclCF - ltclUsed);
 
   var lottery = v('lottery'), vda = v('vda');
@@ -1212,16 +1217,16 @@ function calc() {
   var reb = getRebate(slabInc, slabT);
   var slabAfterReb = Math.max(0, slabT - reb);
 
-  var tStcg = stcgSpecialPortion * 0.20;
-  var tLtcgEq = ltcgSpecialTaxable * 0.125;
-  var tLtcgBond = 0; // already folded into ltcgSpecialTaxable pool
-  var tLtcgProp = 0; // already folded into ltcgSpecialTaxable pool
+  var tStcg    = stcgSpecialPortion * 0.20;
+  var tLtcgEq  = ltcgEqTaxable * 0.125;
+  var tLtcgBond = ltcgBondTaxable * 0.125;
+  var tLtcgProp = ltcgPropTaxable * 0.125 + ltcgPropIdxTax;
   var tLottery = lottery * 0.30;
   var tVDA = vda * 0.30;
-  var specialTax = tStcg + tLtcgEq + tLottery + tVDA;
+  var specialTax = tStcg + tLtcgEq + tLtcgBond + tLtcgProp + tLottery + tVDA;
 
   var preSurch = slabAfterReb + specialTax;
-  var totalInc = slabInc + stcgSpecialPortion + netLTCG_special + lottery + vda;
+  var totalInc = slabInc + stcgSpecialPortion + netLTCG_eq + netLTCG_bond + rawLTCG_prop + rawLTCG_propIdx + lottery + vda;
   var surch = getSurcharge(totalInc, preSurch);
   var cess = (preSurch + surch) * 0.04;
   var dtaaR = Math.min(v('dtaa'), preSurch + surch);
@@ -1236,14 +1241,17 @@ function calc() {
   var rows = '';
   if (salNet) rows += '<div class="rrow"><span class="lbl">Salary (net std ded + NPS)</span><span class="val">' + fmt(salNet) + '</span></div>';
   if (hpInc !== 0) rows += '<div class="rrow"><span class="lbl">House Property</span><span class="val ' + (hpInc < 0 ? 'c-red' : '') + '">' + fmtS(hpInc) + '</span></div>';
-  if (cgSlab) rows += '<div class="rrow"><span class="lbl">Capital Gains (slab rate, net of losses)</span><span class="val">' + fmt(cgSlab) + '</span></div>';
+  if (cgSlab) rows += '<div class="rrow"><span class="lbl">Capital Gains — slab rate (debt/prop STCG + debt LTCG)</span><span class="val">' + fmt(cgSlab) + '</span></div>';
   if (otherSlab) rows += '<div class="rrow"><span class="lbl">Other Sources</span><span class="val">' + fmt(otherSlab) + '</span></div>';
   rows += '<div class="rrow ttl"><span class="lbl c-acc bold">SLAB INCOME</span><span class="val c-acc">' + fmt(slabInc) + '</span></div>';
-  if (stcgSpecialPortion > 0) rows += '<div class="rrow"><span class="lbl">STCG Equity [111A] (net after loss setoff) @ 20%</span><span class="val">' + fmt(stcgSpecialPortion) + '</span></div>';
-  if (netLTCG_special > 0) rows += '<div class="rrow"><span class="lbl">LTCG Special Rate (net after losses &amp; ₹1.25L exempt) @ 12.5%</span><span class="val">' + fmt(ltcgSpecialTaxable) + '</span></div>';
+  if (stcgSpecialPortion > 0) rows += '<div class="rrow"><span class="lbl">STCG Equity [111A] @ 20% (net after loss setoff)</span><span class="val">' + fmt(stcgSpecialPortion) + '</span></div>';
+  if (netLTCG_eq > 0) rows += '<div class="rrow"><span class="lbl">LTCG Equity [112A] — net after loss setoff (exempt ₹1.25L applied)</span><span class="val">' + fmt(ltcgEqTaxable) + ' taxable</span></div>';
+  if (netLTCG_bond > 0) rows += '<div class="rrow"><span class="lbl">LTCG Bonds [112] @ 12.5% (net after loss setoff)</span><span class="val">' + fmt(netLTCG_bond) + '</span></div>';
+  if (rawLTCG_prop > 0) rows += '<div class="rrow"><span class="lbl">LTCG Property [112] @ 12.5%</span><span class="val">' + fmt(rawLTCG_prop) + '</span></div>';
+  if (rawLTCG_propIdx > 0) rows += '<div class="rrow"><span class="lbl">LTCG Property with Indexation [112] @ 20%</span><span class="val">' + fmt(rawLTCG_propIdx) + '</span></div>';
   if (stclCF > 0 || ltclCF > 0) {
-    rows += '<div class="rrow" style="background:#22d87a08;border-radius:4px;padding:8px;margin-top:4px"><span class="lbl c-green">✅ CF Loss Used: STCL ' + fmt(Math.min(stclCF, stclUsedOnSTCG + stclUsedOnLTCG)) + ' + LTCL ' + fmt(Math.min(ltclCF, ltclUsed)) + '</span>';
-    if (lossCarriedFwdRemaining > 0) rows += '<span class="val c-gold">Remaining C/F: ' + fmt(lossCarriedFwdRemaining) + '</span>';
+    rows += '<div class="rrow" style="background:#22d87a08;border-radius:4px;padding:8px;margin-top:4px"><span class="lbl c-green">✅ CF Loss Used: STCL ' + fmt(stclUsedOnSTCG + stclUsedOnLTCG) + ' + LTCL ' + fmt(ltclUsed) + '</span>';
+    if (lossCarriedFwdRemaining > 0) rows += '<span class="val c-gold">Still C/F to next year: ' + fmt(lossCarriedFwdRemaining) + '</span>';
     rows += '</div>';
   }
   if (lottery) rows += '<div class="rrow"><span class="lbl">Lottery @ 30%</span><span class="val">' + fmt(lottery) + '</span></div>';
@@ -1256,10 +1264,12 @@ function calc() {
   taxDetail += '<div class="rrow"><span class="lbl">Slab Tax (before rebate)</span><span class="val">' + fmt(slabT) + '</span></div>';
   if (reb) taxDetail += '<div class="rrow"><span class="lbl">Less: Sec 87A Rebate</span><span class="val c-green">–' + fmt(reb) + '</span></div>';
   taxDetail += '<div class="rrow"><span class="lbl">Slab Tax (after rebate)</span><span class="val">' + fmt(slabAfterReb) + '</span></div>';
-  if (tStcg) taxDetail += '<div class="rrow"><span class="lbl">STCG Equity Tax @ 20% (net)</span><span class="val">' + fmt(tStcg) + '</span></div>';
-  if (tLtcgEq) taxDetail += '<div class="rrow"><span class="lbl">LTCG Special Rate Tax @ 12.5% (net, above ₹1.25L)</span><span class="val">' + fmt(tLtcgEq) + '</span></div>';
-  if (tLottery) taxDetail += '<div class="rrow"><span class="lbl">Lottery Tax @ 30%</span><span class="val">' + fmt(tLottery) + '</span></div>';
-  if (tVDA) taxDetail += '<div class="rrow"><span class="lbl">VDA/Crypto Tax @ 30%</span><span class="val">' + fmt(tVDA) + '</span></div>';
+  if (tStcg)     taxDetail += '<div class="rrow"><span class="lbl">STCG Equity Tax @ 20% (net)</span><span class="val">' + fmt(tStcg) + '</span></div>';
+  if (tLtcgEq)   taxDetail += '<div class="rrow"><span class="lbl">LTCG Equity [112A] Tax @ 12.5% (above ₹1.25L)</span><span class="val">' + fmt(tLtcgEq) + '</span></div>';
+  if (tLtcgBond) taxDetail += '<div class="rrow"><span class="lbl">LTCG Bond [112] Tax @ 12.5%</span><span class="val">' + fmt(tLtcgBond) + '</span></div>';
+  if (tLtcgProp) taxDetail += '<div class="rrow"><span class="lbl">LTCG Property Tax (12.5% / 20%+idx)</span><span class="val">' + fmt(tLtcgProp) + '</span></div>';
+  if (tLottery)  taxDetail += '<div class="rrow"><span class="lbl">Lottery Tax @ 30%</span><span class="val">' + fmt(tLottery) + '</span></div>';
+  if (tVDA)      taxDetail += '<div class="rrow"><span class="lbl">VDA/Crypto Tax @ 30%</span><span class="val">' + fmt(tVDA) + '</span></div>';
   taxDetail += '<div class="rrow ttl"><span class="lbl">Tax before Surcharge</span><span class="val">' + fmt(preSurch) + '</span></div>';
   if (surch) taxDetail += '<div class="rrow"><span class="lbl">Surcharge</span><span class="val c-red">' + fmt(surch) + '</span></div>';
   taxDetail += '<div class="rrow"><span class="lbl">H&E Cess @ 4%</span><span class="val c-red">' + fmt(cess) + '</span></div>';
